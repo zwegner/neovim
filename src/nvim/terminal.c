@@ -156,6 +156,25 @@ static Map(int, int) *color_indexes;
 static int default_vt_fg, default_vt_bg;
 static VTermColor default_vt_bg_rgb;
 
+// xmalloc() wrapper that conforms to libvterm's allocator API
+void *term_alloc(size_t size, void *user_data)
+{
+  void *ptr = xmalloc(size);
+  memset(ptr, 0, size);
+  return ptr;
+}
+
+// ...and same with xfree()
+void term_free(void *ptr, void *user_data)
+{
+  xfree(ptr);
+}
+
+static VTermAllocatorFunctions vterm_allocators = {
+  .malloc  = term_alloc,
+  .free    = term_free,
+};
+
 void terminal_init(void)
 {
   invalidated_terminals = pmap_new(ptr_t)();
@@ -166,7 +185,7 @@ void terminal_init(void)
   // initialize a rgb->color index map for cterm attributes(VTermScreenCell
   // only has RGB information and we need color indexes for terminal UIs)
   color_indexes = map_new(int, int)();
-  VTerm *vt = vterm_new(24, 80);
+  VTerm *vt = vterm_new_with_allocator(24, 80, &vterm_allocators, NULL);
   VTermState *state = vterm_obtain_state(vt);
 
   for (int color_index = 255; color_index >= 0; color_index--) {
