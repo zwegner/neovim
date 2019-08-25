@@ -97,11 +97,6 @@ typedef struct terminal_state {
 static TimeWatcher refresh_timer;
 static bool refresh_pending = false;
 
-typedef struct {
-  size_t cols;
-  VTermScreenCell cells[];
-} ScrollbackLine;
-
 struct terminal {
   TerminalOptions opts;  // options passed to terminal_open
   VTerm *vt;
@@ -111,7 +106,8 @@ struct terminal {
   //  - receive data from libvterm as a result of key presses.
   char textbuf[0x1fff];
 
-  ScrollbackLine **sb_buffer;       // Scrollback buffer storage for libvterm
+  // XXX we should be using a circular buffer for scrollback
+  VTermScreenLine **sb_buffer;      // Scrollback buffer storage for libvterm
   size_t sb_current;                // number of rows pushed to sb_buffer
   size_t sb_size;                   // sb_buffer size
   // "virtual index" that points to the first sb_buffer row that we need to
@@ -272,7 +268,7 @@ Terminal *terminal_open(TerminalOptions opts)
 
   // Configure the scrollback buffer.
   rv->sb_size = (size_t)curbuf->b_p_scbk;
-  rv->sb_buffer = xmalloc(sizeof(ScrollbackLine *) * rv->sb_size);
+  rv->sb_buffer = xmalloc(sizeof(VTermScreenLine *) * rv->sb_size);
 
   if (!true_color) {
     // Change the first 16 colors so we can easily get the correct color
@@ -780,42 +776,28 @@ static int term_bell(void *data)
 }
 
 // Scrollback push handler (from pangoterm).
-static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
+static int term_sb_push(VTermScreenLine *line, void *user)
 {
-  Terminal *term = data;
+  Terminal *term = user;
 
   if (!term->sb_size) {
     return 0;
   }
 
-  // copy vterm cells into sb_buffer
-  size_t c = (size_t)cols;
-  ScrollbackLine *sbrow = NULL;
+  // Free the oldest line from the scrollback if we're at the limit
   if (term->sb_current == term->sb_size) {
-    if (term->sb_buffer[term->sb_current - 1]->cols == c) {
-      // Recycle old row if it's the right size
-      sbrow = term->sb_buffer[term->sb_current - 1];
-    } else {
-      xfree(term->sb_buffer[term->sb_current - 1]);
-    }
+    xfree(term->sb_buffer[term->sb_current - 1]);
+    term->sb_current--;
+  }
 
-    // Make room at the start by shifting to the right.
-    memmove(term->sb_buffer + 1, term->sb_buffer,
-        sizeof(term->sb_buffer[0]) * (term->sb_current - 1));
-
-  } else if (term->sb_current > 0) {
-    // Make room at the start by shifting to the right.
+  // Shift all previous lines back in memory
+  if (term->sb_current > 0) {
     memmove(term->sb_buffer + 1, term->sb_buffer,
         sizeof(term->sb_buffer[0]) * term->sb_current);
   }
 
-  if (!sbrow) {
-    sbrow = xmalloc(sizeof(ScrollbackLine) + c * sizeof(sbrow->cells[0]));
-    sbrow->cols = c;
-  }
-
   // New row is added at the start of the storage buffer.
-  term->sb_buffer[0] = sbrow;
+  term->sb_buffer[0] = line;
   if (term->sb_current < term->sb_size) {
     term->sb_current++;
   }
@@ -824,7 +806,6 @@ static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
     term->sb_pending++;
   }
 
-  memcpy(sbrow->cells, cells, sizeof(cells[0]) * c);
   pmap_put(ptr_t)(invalidated_terminals, term, NULL);
 
   return 1;
@@ -835,40 +816,29 @@ static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
 /// @param cols
 /// @param cells  VTerm state to update.
 /// @param data   Terminal
-static int term_sb_pop(int cols, VTermScreenCell *cells, void *data)
+static VTermScreenLine *term_sb_pop(void *user)
 {
-  Terminal *term = data;
+  Terminal *term = user;
 
   if (!term->sb_current) {
-    return 0;
+    return NULL;
   }
 
   if (term->sb_pending) {
     term->sb_pending--;
   }
 
-  ScrollbackLine *sbrow = term->sb_buffer[0];
-  term->sb_current--;
+  // Get the first scrollback line
+  VTermScreenLine *line = term->sb_buffer[0];
+
   // Forget the "popped" row by shifting the rest onto it.
+  term->sb_current--;
   memmove(term->sb_buffer, term->sb_buffer + 1,
       sizeof(term->sb_buffer[0]) * (term->sb_current));
 
-  size_t cols_to_copy = (size_t)cols;
-  if (cols_to_copy > sbrow->cols) {
-    cols_to_copy = sbrow->cols;
-  }
-
-  // copy to vterm state
-  memcpy(cells, sbrow->cells, sizeof(cells[0]) * cols_to_copy);
-  for (size_t col = cols_to_copy; col < (size_t)cols; col++) {
-    cells[col].chars[0] = 0;
-    cells[col].width = 1;
-  }
-
-  xfree(sbrow);
   pmap_put(ptr_t)(invalidated_terminals, term, NULL);
 
-  return 1;
+  return line;
 }
 
 // }}}
@@ -1140,8 +1110,8 @@ static void fetch_cell(Terminal *term, int row, int col,
     VTermScreenCell *cell)
 {
   if (row < 0) {
-    ScrollbackLine *sbrow = term->sb_buffer[-row - 1];
-    if ((size_t)col < sbrow->cols) {
+    VTermScreenLine *sbrow = term->sb_buffer[-row - 1];
+    if ((size_t)col < sbrow->len) {
       *cell = sbrow->cells[col];
     } else {
       // fill the pointer with an empty cell
@@ -1252,7 +1222,7 @@ static void on_scrollback_option_changed(Terminal *term, buf_T *buf)
   }
 
   // Resize the scrollback storage.
-  size_t sb_region = sizeof(ScrollbackLine *) * scbk;
+  size_t sb_region = sizeof(VTermScreenLine *) * scbk;
   if (scbk != term->sb_size) {
     term->sb_buffer = xrealloc(term->sb_buffer, sb_region);
   }
