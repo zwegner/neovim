@@ -1096,7 +1096,7 @@ static void fetch_row(Terminal *term, int row, int end_col)
     fetch_cell(term, row, col, &cell);
     int cell_len = 0;
     if (cell.chars[0]) {
-      for (int i = 0; cell.chars[i]; i++) {
+      for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; i++) {
         cell_len += utf_char2bytes((int)cell.chars[i],
             (uint8_t *)ptr + cell_len);
       }
