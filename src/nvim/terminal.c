@@ -1073,6 +1073,44 @@ end:
 // }}}
 // terminal buffer refresh & misc {{{
 
+static char *alloc_and_fetch_sb_row(Terminal *term, int row, size_t *line_len)
+{
+  VTermScreenLine *sbrow = term->sb_buffer[-row - 1];
+
+  // Allocate VTERM_MAX_CHARS_PER_CELL*4*line length + 1 as an upper bound (4 bytes
+  // maximum per code point, one byte for NUL). This is way overkill most of the time!
+  char *base_ptr = xmalloc(sbrow->len * VTERM_MAX_CHARS_PER_CELL * 4 + 1);
+  char *ptr = base_ptr;
+
+  size_t col = 0;
+  *line_len = 0;
+  while (col < sbrow->len) {
+    VTermScreenCell cell = sbrow->cells[col];
+
+    int cell_len = 0;
+    if (cell.chars[0]) {
+      for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cell.chars[i]; i++) {
+        cell_len += utf_char2bytes((int)cell.chars[i],
+            (uint8_t *)ptr + cell_len);
+      }
+    } else {
+      *ptr = ' ';
+      cell_len = 1;
+    }
+    char c = *ptr;
+    ptr += cell_len;
+    if (c != ' ') {
+      // only increase the line length if the last character is not whitespace
+      *line_len = (size_t)(ptr - base_ptr);
+    }
+    col += cell.width;
+  }
+
+  // is the NUL necessary when we're passing in the length?
+  base_ptr[(*line_len)++] = 0;
+  return base_ptr;
+}
+
 
 static void fetch_row(Terminal *term, int row, int end_col)
 {
@@ -1246,11 +1284,13 @@ static void refresh_scrollback(Terminal *term, buf_T *buf)
       ml_delete(1, false);
       deleted_lines(1, 1);
     }
-    fetch_row(term, -term->sb_pending, width);
+    size_t line_len;
+    char *row = alloc_and_fetch_sb_row(term, -term->sb_pending, &line_len);
     int buf_index = (int)buf->b_ml.ml_line_count - height;
-    ml_append(buf_index, (uint8_t *)term->textbuf, 0, false);
+    ml_append(buf_index, (uint8_t *)row, line_len, false);
     appended_lines(buf_index, 1);
     term->sb_pending--;
+    xfree(row);
   }
 
   // Remove extra lines at the bottom
